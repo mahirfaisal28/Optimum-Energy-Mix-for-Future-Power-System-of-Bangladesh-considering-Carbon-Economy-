@@ -1,1 +1,1 @@
-# Optimum-Energy-Mix-for-Future-Power-System-of-Bangladesh-considering-Carbon-Economy-
+"Optimum Energy Mix for Future Power System of Bangladesh Considering Carbon Economy" explores strategies for balancing Bangladesh's energy needs with environmental sustainability. The study analyzes different energy sources, including renewables, to determine the most efficient and cost-effective mix. By considering carbon emissions, the research aims to support Bangladesh's transition to a low-carbon economy, ensuring reliable energy supply while minimizing environmental impact.

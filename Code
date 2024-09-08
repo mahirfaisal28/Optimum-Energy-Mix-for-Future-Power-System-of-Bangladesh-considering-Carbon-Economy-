@@ -2,27 +2,19 @@ clc;
 clear all;
 close all;
 
-% Define parameters
+%% 1. Initialization of Parameters
 years = 11;
 types = {'Coal', 'Gas', 'Nuclear', 'Hydro', 'Biomass', 'Solar', 'Wind'};
 n_types = length(types);
 
-% Real Investment Costs ($/kW)
+% Define Costs and Capacities
 investment_cost = [1750, 600, 5500, 3250, 2750, 1250, 1500]; 
-
-% Real Fuel Costs ($/kWh)
 fuel_cost = [0.04, 0.06, 0.01, 0, 0.03, 0, 0]; 
-
-% Real O&M Costs ($/kWh)
 om_cost = [0.03, 0.02, 0.02, 0.01, 0.02, 0.01, 0.01]; 
-
-% Real Carbon Intensity (g/kWh)
-carbon_intensity = [850, 500, 0, 0, 450, 0, 0]; 
-
-% Real Carbon Costs ($/kWh)
+carbon_intensity = [850, 500, 0, 0, 450, 0, 0]; % in gCO2/kWh
 carbon_cost = [0.03, 0.02, 0.01, 0.005, 0.02, 0, 0]; 
 
-% Demand Growth & Initial Load Demand (example values, should be adapted with real data)
+% Demand Growth & Initial Load Demand
 initial_load_demand = 1550; % in MW
 load_demand = initial_load_demand * (1.06.^(0:years-1)); % increase by 6% each year
 
@@ -31,180 +23,170 @@ max_capacity = [800, 1000, 300, 700, 400, 600, 400]; % in MW
 min_capacity = [100, 50, 30, 70, 20, 100, 80]; % in MW
 max_operating_hours = [7000, 6500, 3000, 2000, 4000, 4000, 3500]; % in hours/year
 
-% Carbon emission limit (example value, should be adapted with real data)
-total_carbon_limit = 7000000; % in tonnes (adjust as needed)
+% Carbon emission limit
+total_carbon_limit = 7000000; % in tonnes
 
 % Adjust costs and capacities over time
-investment_costs1 = investment_cost' .* (1.02.^(0:years-1)); % Each column is the cost for each year
-fuel_costs1 = fuel_cost' .* (1.2.^(0:years-1));
+investment_costs1 = investment_cost' .* (1.02.^(0:years-1));
+fuel_costs1 = fuel_cost' .* (1.02.^(0:years-1));
 om_costs1 = om_cost' .* (1.02.^(0:years-1));
 carbon_costs1 = carbon_cost' .* (1.04.^(0:years-1));
-max_capacity1 = repmat(max_capacity', 1, years); % Initialize with base values
+max_capacity1 = repmat(max_capacity', 1, years);
 
 min_capacity1 = min_capacity' .* (1.06.^(0:years-1));
 max_operating_hours1 = max_operating_hours' .* (1.06.^(0:years-1));
 
-% Decision variables: capacities for each year and type
+%% 2. Define Decision Variables
 capacity = sdpvar(n_types, years, 'full');
-
-% Objective function
 annual_costs = sdpvar(1, years);
+annual_carbon_emissions = sdpvar(1, years);
 
+%% 3. Objective Function Calculation
 for y = 1:years
     annual_cost = 0;
     for t = 1:n_types
-        % Include investment cost separately
         investment_cost_t = investment_costs1(t, y) * capacity(t, y);
-        operational_cost_t = fuel_costs1(t, y) * load_demand(y) + om_costs1(t, y) * load_demand(y) + carbon_costs1(t, y) * load_demand(y);
-        
-        % Prioritize renewables: minimize investment and operational costs for renewables, penalize fossil fuels
-        if ismember(t, [6, 7, 5]) % Renewable types: Solar, Wind, Biomass
-            annual_cost = annual_cost + investment_cost_t + 0.8 * operational_cost_t;
-        else % Fossil Fuels: Coal, Gas
-            annual_cost = annual_cost + investment_cost_t + 1.2 * operational_cost_t;
-        end
+        energy_generated = capacity(t, y) * max_operating_hours1(t, y); % in MWh
+        operational_cost_t = energy_generated * (fuel_costs1(t, y) + om_costs1(t, y) + carbon_costs1(t, y));
+        annual_cost = annual_cost + investment_cost_t + operational_cost_t;
     end
     annual_costs(y) = annual_cost;
 end
 
-% Constraints
+%% 4. Define Constraints with Reserve Margin
 constraints = [];
-total_carbon_emissions = 0; % Initialize total carbon emissions
+reserve_margin_rate = 0.10;
 
 for y = 1:years
-    % Capacity constraints
     for t = 1:n_types
         constraints = [constraints, min_capacity1(t) <= capacity(t, y) <= max_capacity1(t)];
     end
     
-    % Load demand constraint
-    total_generation = sum(capacity(:, y));
-    constraints = [constraints, total_generation >= load_demand(y)];
+    % Calculate total generation with reserve margin
+    total_generation = sum(capacity(:, y) .* max_operating_hours1(:, y));
+    reserve_margin = reserve_margin_rate * load_demand(y) * 8760;
+    constraints = [constraints, total_generation >= (load_demand(y) * 8760 + reserve_margin)];
     
-    % Operating hours constraint
-    for t = 1:n_types
-        constraints = [constraints, capacity(t, y) * max_operating_hours1(t) >= load_demand(y)];
-    end
+    % Calculate annual carbon emissions and apply the yearly limit
+    annual_carbon_emissions(y) = sum((carbon_intensity .* capacity(:, y)') .* max_operating_hours1(:, y)', 2) * 1e-6; % Convert to tonnes
+    constraints = [constraints, annual_carbon_emissions(y) <= total_carbon_limit];
     
-    % Carbon emission constraint for the year
-    annual_carbon_emissions = sum((carbon_intensity .* capacity(:, y)') * load_demand(y) * 1e-6); % in tonnes
-    total_carbon_emissions = total_carbon_emissions + annual_carbon_emissions;
     
-    % Fossil fuel reduction constraint
     if y > 1
-        constraints = [constraints, capacity(1:2, y) <= 0.95 * capacity(1:2, y-1)]; % Reduce Coal & Gas by 5% each year
+        constraints = [constraints, capacity(1:2, y) <= 0.95 * capacity(1:2, y-1)];
     end
 end
 
-% Add carbon emission limit constraint
-constraints = [constraints, total_carbon_emissions <= total_carbon_limit];
-
-% Optimize
+%% 5. Linear Optimization
 options = sdpsettings('verbose', 1, 'solver', 'linprog');
 optimize(constraints, sum(annual_costs), options);
 
-% Calculate non-optimized annual costs directly
+%% 6. Calculate Non-Optimized Annual Costs
 non_optimized_annual_costs = zeros(1, years);
+
 for y = 1:years
-    non_optimized_annual_cost = 0;
+    annual_cost = 0;
     for t = 1:n_types
-        non_optimized_annual_cost = non_optimized_annual_cost + investment_costs1(t, y) * max_capacity1(t) + ...
-            fuel_costs1(t, y) * load_demand(y) + ...
-            om_costs1(t, y) * load_demand(y) + ...
-            carbon_costs1(t, y) * load_demand(y);
+        max_capacity_t = max_capacity1(t, y);
+        investment_cost_t = investment_costs1(t, y) * max_capacity_t;
+        energy_generated = max_capacity_t * max_operating_hours1(t, y); % in MWh
+        operational_cost_t = energy_generated * (fuel_costs1(t, y) + om_costs1(t, y) + carbon_costs1(t, y));
+        annual_cost = annual_cost + investment_cost_t + operational_cost_t;
     end
-    non_optimized_annual_costs(y) = non_optimized_annual_cost;
+    non_optimized_annual_costs(y) = annual_cost;
 end
 
-% Display results
+%% 7. Display Results
 annual_costs_opt = value(annual_costs);
+annual_carbon_emissions_opt = value(annual_carbon_emissions);
+
 disp('Optimal Annual Costs ($) per Year:');
 disp(array2table(annual_costs_opt', 'VariableNames', {'AnnualCost'}));
 
-% Plot optimized results
-figure;
-bar(1:years, annual_costs_opt, 'FaceColor', [0.2, 0.6, 0.8]);
-xlabel('Year');
-ylabel('Total Cost ($)');
-title('Optimized Total Cost for year (2025-2035)');
-xticks(1:years);
-xticklabels(2025:2035);
-grid on;
-
-% Display non-optimized results
 disp('Non-Optimized Annual Costs ($) per Year:');
 disp(array2table(non_optimized_annual_costs', 'VariableNames', {'AnnualCost'}));
 
-% Plot non-optimized results
+%% 8. Plot Optimized vs Non-Optimized Costs
 figure;
-bar(1:years, non_optimized_annual_costs, 'FaceColor', [1, 0, 0]); % Red color
+hold on;
+bar(1:years, non_optimized_annual_costs, 'FaceColor', [0, 0, 1]); % Blue
+bar(1:years, annual_costs_opt, 'FaceColor', [1, 1, 0]); % Yellow
 xlabel('Year');
 ylabel('Total Cost ($)');
-title('Non-Optimized Total Cost for year (2025-2035)');
+title('Comparison of Optimized and Non-Optimized Total Costs for Years 2025-2035');
 xticks(1:years);
 xticklabels(2025:2035);
 grid on;
+legend('Non-Optimized', 'Optimized');
+hold off;
 
-% Calculate the optimized capacities
+
+%% 9. Energy Mix Visualization
 optimized_capacity = value(capacity);
 
-% Define the number of years to display in each figure
 years_per_figure = 5;
 
-% Create the first figure for the first 5 years
 figure;
 for y = 1:years_per_figure
-    % Create a subplot for each year
-    subplot(2, ceil(years_per_figure/2), y); % Adjust the subplot layout as needed
-    % Plot the pie chart for the current year's energy mix
+    subplot(2, ceil(years_per_figure/2), y);
     pie(optimized_capacity(:, y), types);
-    % Add a title for each subplot
     title(['Year ' num2str(2024 + y) ' Energy Mix (Optimized)']);
     
-    % Add percentages to pie chart
     percentage_labels = strcat(types', ': ', num2str((optimized_capacity(:, y)/sum(optimized_capacity(:, y)))*100, '%.2f'), '%');
     legend(percentage_labels, 'Location', 'bestoutside');
 end
-
-% Add an overall title for the first figure
 sgtitle('Energy Mix Distribution for Years 2025 to 2029');
 
-% Create the second figure for the next 5 years
 figure;
 for y = (years_per_figure + 1):years
-    % Create a subplot for each year
-    subplot(2, ceil(years_per_figure/2), y - years_per_figure); % Adjust the subplot layout as needed
-    % Plot the pie chart for the current year's energy mix
+    subplot(2, ceil(years_per_figure/2), y - years_per_figure);
     pie(optimized_capacity(:, y), types);
-    % Add a title for each subplot
     title(['Year ' num2str(2024 + y) ' Energy Mix (Optimized)']);
     
-    % Add percentages to pie chart
     percentage_labels = strcat(types', ': ', num2str((optimized_capacity(:, y)/sum(optimized_capacity(:, y)))*100, '%.2f'), '%');
     legend(percentage_labels, 'Location', 'bestoutside');
 end
-
-% Add an overall title for the second figure
 sgtitle('Energy Mix Distribution for Years 2030 to 2035');
 
-% Calculate the total generation capacity per year to normalize
+%% 10. Energy Mix Change Over Time
 total_capacity_per_year = sum(optimized_capacity, 1);
-
-% Normalize the optimized capacity to get the percentage mix
 percentage_mix = (optimized_capacity ./ total_capacity_per_year) * 100;
 
-% Generate a line graph for energy mix
 figure;
 hold on;
-line_width = 2; % Specify the desired line width
+line_width = 2;
 for t = 1:n_types
     plot(1:years, percentage_mix(t, :), 'LineWidth', line_width, 'DisplayName', types{t});
 end
 hold off;
 xlabel('Year');
 ylabel('Percentage of Total Capacity (%)');
-title('Change in Energy Mix Over the year (2025-2035)');
+title('Change in Energy Mix Over the Year (2025-2035)');
 xticks(1:years);
 xticklabels(2025:2035);
 legend('show');
 grid on;
+
+%% 11. Calculate Energy Generation and Compare with Peak Demand
+peak_demand = load_demand * 1.15; % Adjusted to 15% more than the load demand
+
+% Calculate the total energy generation for each year
+energy_generation = sum(optimized_capacity .* max_operating_hours1, 1); % in MWh
+
+% Convert energy generation to MW by dividing by 8760 hours in a year
+energy_generation_MW = energy_generation / 8760;
+
+% Plot the Energy Generation vs. Peak Demand Curve
+figure;
+hold on;
+plot(1:years, energy_generation_MW, '-o', 'LineWidth', 2, 'DisplayName', 'Demand (MW)');
+plot(1:years, peak_demand, '-o', 'LineWidth', 2, 'DisplayName', 'Energy Generation (MW)');
+hold off;
+xlabel('Year');
+ylabel('Power (MW)');
+title('Energy Generation vs. Demand (2025-2035)');
+xticks(1:years);
+xticklabels(2025:2035);
+legend('show');
+grid on;
+
